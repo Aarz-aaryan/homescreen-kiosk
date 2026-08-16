@@ -1,0 +1,19 @@
+[Unit]
+Description=homescreen lofi stream (mpv → HDMI audio)
+After=graphical.target kiosk-web.service NetworkManager.service sound.target
+Wants=graphical.target
+
+[Service]
+Type=simple
+User=kiosk
+Environment=DISPLAY=:0
+Environment=XAUTHORITY=/home/kiosk/.Xauthority
+ExecStartPre=/bin/sleep 5
+ExecStart=/opt/kiosk/start-lofi.sh
+Restart=always
+RestartSec=10
+StandardOutput=append:/home/kiosk/.lofi.log
+StandardError=append:/home/kiosk/.lofi.log
+
+[Install]
+WantedBy=graphical.target

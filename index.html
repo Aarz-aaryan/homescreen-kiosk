@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>homescreen · dashboard</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    width: 100vw;
+    height: 100vh;
+    overflow: hidden;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    color: #f1f5f9;
+    background: #0b1220;
+  }
+
+  /* === Background: full-screen animated GIF, fully visible === */
+  .bg {
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+    overflow: hidden;
+    background: #000;
+  }
+  .bg img {
+    /* Position centered, scaled to fully cover viewport */
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    min-width: 100vw;
+    min-height: 100vh;
+    width: auto;
+    height: auto;
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+    /* minimal darkening so pixel art is vivid */
+    filter: brightness(0.95) contrast(1.05) saturate(1.25);
+  }
+
+  /* === ONE consolidated tile, top-left, compact === */
+  .tile {
+    position: fixed;
+    top: 14px;
+    left: 14px;
+    z-index: 1;
+    width: 340px;
+    background: rgba(11, 18, 32, 0.78);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid rgba(99, 102, 241, 0.35);
+    border-radius: 14px;
+    padding: 12px 14px;
+    color: #f1f5f9;
+    font-size: 11px;
+    line-height: 1.45;
+  }
+  .tile .hdr {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    margin-bottom: 8px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid rgba(99, 102, 241, 0.2);
+  }
+  .tile .hdr .title {
+    font-size: 10px;
+    letter-spacing: 0.2em;
+    color: #94a3b8;
+    text-transform: uppercase;
+    font-weight: 700;
+  }
+  .tile .hdr .live {
+    font-size: 9px;
+    color: #22c55e;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+  }
+  .tile .hdr .live.warn { color: #f59e0b; }
+  .tile .hdr .live.crit { color: #ef4444; }
+
+  /* === Time block: biggest element === */
+  .time-row {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    margin-bottom: 4px;
+  }
+  .clock {
+    font-size: 32px;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+  }
+  .date {
+    font-size: 11px;
+    color: #cbd5e1;
+  }
+
+  /* === Compact status rows === */
+  .row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 3px 0;
+    gap: 8px;
+  }
+  .row .lbl { color: #94a3b8; font-size: 10px; }
+  .row .val { font-size: 11px; font-weight: 600; text-align: right; }
+  .row .val.green { color: #22c55e; }
+  .row .val.red { color: #ef4444; }
+  .row .val.amber { color: #f59e0b; }
+  .row .val.cyan { color: #67e8f9; }
+
+  /* === Monitors list: compact === */
+  .mons {
+    margin-top: 6px;
+    padding-top: 6px;
+    border-top: 1px solid rgba(99, 102, 241, 0.18);
+  }
+  .mons .lbl {
+    color: #94a3b8;
+    font-size: 9px;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    font-weight: 700;
+    margin-bottom: 4px;
+    display: flex;
+    justify-content: space-between;
+  }
+  .mons .lbl .count { color: #22c55e; }
+  .mons .lbl .count.warn { color: #f59e0b; }
+  .mons .lbl .count.crit { color: #ef4444; }
+  .mons .grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 2px 6px;
+  }
+  .mon {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 10px;
+    padding: 2px 4px;
+    border-radius: 3px;
+    background: rgba(30, 41, 59, 0.5);
+  }
+  .mon.down { opacity: 0.65; }
+  .mon .name { color: #e2e8f0; font-weight: 600; }
+  .mon .dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: #22c55e;
+    flex-shrink: 0;
+    margin-left: 4px;
+  }
+  .mon.down .dot { background: #ef4444; }
+
+  /* === Footer pill (bottom-right corner, compact) === */
+  .footer {
+    position: fixed;
+    bottom: 14px;
+    right: 14px;
+    z-index: 1;
+    background: rgba(11, 18, 32, 0.7);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    border: 1px solid rgba(99, 102, 241, 0.25);
+    border-radius: 8px;
+    padding: 6px 10px;
+    font-size: 9px;
+    color: #94a3b8;
+    letter-spacing: 0.05em;
+  }
+  .footer .v { color: #cbd5e1; font-weight: 600; }
+</style>
+</head>
+<body>
+
+<div class="bg">
+  <img id="bg-img" src="/backgrounds/alone.gif" alt="">
+</div>
+
+<div class="tile">
+  <div class="hdr">
+    <span class="title">homescreen</span>
+    <span class="live" id="live-tag">● LIVE</span>
+  </div>
+
+  <!-- Time -->
+  <div class="time-row">
+    <div class="clock" id="clock">--:-- --</div>
+  </div>
+  <div class="date" id="date">--</div>
+
+  <!-- Identity + Weather (collapsed) -->
+  <div class="row" style="margin-top:8px">
+    <span class="lbl">weather</span>
+    <span class="val cyan" id="wx-now">—</span>
+  </div>
+  <div class="row">
+    <span class="lbl">tailscale</span>
+    <span class="val green" id="ts-count">—</span>
+  </div>
+  <div class="row">
+    <span class="lbl">r-server</span>
+    <span class="val" id="rs-status">—</span>
+  </div>
+
+  <!-- r-server stats -->
+  <div class="row">
+    <span class="lbl">cpu · mem · disk</span>
+    <span class="val cyan" id="rs-stats">— · — · —</span>
+  </div>
+  <div class="row">
+    <span class="lbl">uptime</span>
+    <span class="val" id="rs-up">—</span>
+  </div>
+  <div class="row">
+    <span class="lbl">audio</span>
+    <span class="val" id="audio-status">—</span>
+  </div>
+
+  <!-- Monitors -->
+  <div class="mons">
+    <div class="lbl">
+      <span>monitors</span>
+      <span class="count" id="mon-count">— UP · — DOWN</span>
+    </div>
+    <div class="grid" id="mons-grid">
+      <div class="mon"><span class="name">loading…</span><span class="dot"></span></div>
+    </div>
+  </div>
+</div>
+
+<!-- Footer: bg name + refresh interval -->
+<div class="footer">
+  bg: <span class="v" id="f-bg">—</span> · ♫ somafm · 100.110.212.126 · v2.2
+</div>
+
+<script>
+const REFRESH_MS = 10000;
+const BG_ROTATE_MS = 5 * 60 * 1000;
+
+function pad(n) { return n < 10 ? "0" + n : "" + n; }
+
+function updateClock() {
+  const d = new Date();
+  let h = d.getHours();
+  const ampm = h >= 12 ? "PM" : "AM";
+  h = h % 12; if (h === 0) h = 12;
+  document.getElementById("clock").textContent = h + ":" + pad(d.getMinutes()) + " " + ampm;
+  const months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  const days = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
+  document.getElementById("date").textContent =
+    days[d.getDay()] + ", " + months[d.getMonth()] + " " + d.getDate();
+}
+
+async function fetchJSON(url) {
+  try { const r = await fetch(url, { cache: "no-store" }); return await r.json(); }
+  catch (e) { return null; }
+}
+
+async function refreshIdentity() {
+  const d = await fetchJSON("/identity.json"); if (!d) return;
+  const tsState = (d.tailscale || "—").toLowerCase();
+  const live = document.getElementById("live-tag");
+  if (tsState === "online") {
+    live.textContent = "● ONLINE"; live.className = "live";
+  } else if (tsState === "offline") {
+    live.textContent = "○ OFFLINE"; live.className = "live crit";
+  } else {
+    live.textContent = "— " + (d.tailscale || "unknown").toUpperCase();
+    live.className = "live warn";
+  }
+}
+
+async function refreshMonitors() {
+  const d = await fetchJSON("/monitors.json"); if (!d) return;
+  const monitors = d.monitors || [];
+  const up = monitors.filter(m => m.active).length;
+  const down = monitors.length - up;
+  const cnt = document.getElementById("mon-count");
+  cnt.textContent = up + " UP · " + down + " DOWN";
+  cnt.className = "count" + (down > 0 ? " crit" : "");
+  const grid = document.getElementById("mons-grid"); grid.innerHTML = "";
+  for (const m of monitors) {
+    const div = document.createElement("div");
+    div.className = "mon" + (m.active ? "" : " down");
+    div.innerHTML = '<span class="name">' + escapeHTML(m.name) + '</span><span class="dot"></span>';
+    grid.appendChild(div);
+  }
+}
+
+async function refreshRSStats() {
+  const d = await fetchJSON("/rserver-stats.json"); if (!d) return;
+  document.getElementById("rs-stats").textContent =
+    (d.cpu || "—") + "% · " + (d.mem || "—") + "% · " + (d.disk || "—") + " GB";
+  document.getElementById("rs-up").textContent = d.uptime || "—";
+  // rs status indicator
+  const cpu = parseInt(d.cpu || 0);
+  const status = document.getElementById("rs-status");
+  if (d.cpu && d.cpu !== "—") {
+    status.textContent = "● online";
+    status.className = "val green";
+  } else {
+    status.textContent = "○ " + (d.error || "unknown");
+    status.className = "val amber";
+  }
+}
+
+async function refreshHermes() {
+  const d = await fetchJSON("/hermes-health.json"); if (!d) return;
+  document.getElementById("ts-count").textContent = d.tailscale_online || "—";
+  // r-server row also reflects hermes info; rely on rs-status above
+}
+
+async function refreshWeather() {
+  const w = await fetchJSON("/weather.json"); if (!w) return;
+  const cond = (w.cond || "—");
+  document.getElementById("wx-now").textContent =
+    (w.temp || "—") + "°" + (cond !== "—" ? " " + cond : "");
+}
+
+async function refreshAudio() {
+  const a = await fetchJSON("/audio.json"); if (!a) return;
+  const el = document.getElementById("audio-status");
+  if (a.playing) {
+    // Show playing + short track
+    const track = (a.track || a.station || "").replace(/^.*? - /, "").slice(0, 32);
+    el.textContent = "♫ " + (track || "playing");
+    el.className = "val cyan";
+  } else {
+    el.textContent = "○ off";
+    el.className = "val amber";
+  }
+}
+
+async function rotateBackground() {
+  const list = await fetchJSON("/backgrounds/list.json");
+  if (!list || !list.backgrounds || list.backgrounds.length === 0) return;
+  const pick = list.backgrounds[Math.floor(Math.random() * list.backgrounds.length)];
+  const url = "/backgrounds/" + encodeURIComponent(pick) + "?t=" + Date.now();
+  document.getElementById("bg-img").src = url;
+  document.getElementById("f-bg").textContent = pick.replace(/\.gif$/i, "");
+}
+
+function escapeHTML(s) {
+  return (s || "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+
+updateClock();
+setInterval(updateClock, 1000);
+refreshIdentity(); refreshMonitors(); refreshRSStats(); refreshHermes(); refreshWeather(); refreshAudio();
+setInterval(() => { refreshIdentity(); refreshMonitors(); refreshRSStats(); refreshHermes(); refreshWeather(); refreshAudio(); }, REFRESH_MS);
+
+rotateBackground();
+setInterval(rotateBackground, BG_ROTATE_MS);
+</script>
+</body>
+</html>
