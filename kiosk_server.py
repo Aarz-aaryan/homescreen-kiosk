@@ -9,6 +9,7 @@ Serves /opt/kiosk/index.html + dynamically generated JSON endpoints.
 - /hermes-health.json: tailscale peer counts, r-server reachability
 - /weather.json:     Open-Meteo current weather (free, no auth)
 - /audio.json:      mpv lofi stream status
+- /calendar.json:    Next 3 upcoming events from Nextcloud CalDAV
 - /backgrounds/list.json: pre-validated GIF list (magic-byte checked)
 - /backgrounds/<name>:  raw GIF bytes (only from validated list)
 - /index.html: static
@@ -19,6 +20,7 @@ import http.server
 import json
 import subprocess
 import os
+import re
 import time
 from pathlib import Path
 
@@ -54,22 +56,24 @@ def _refresh_valid_gifs():
         f.name for f in _gifs_dir.iterdir()
         if is_valid_gif(f)
     ])
-    print(f"[GIF] {len(_valid_gifs)}/{len(list(_gifs_dir.glob('*')))} validated GIFs: {_valid_gifs}")
+    print(f"[GIF] {len(_valid_gifs)}/{len(list(_gifs_dir.glob('*')))} validated GIFs")
 
 _refresh_valid_gifs()
 
 # ─── CACHE ────────────────────────────────────────────────────────────────────
 _last_monitors_refresh  = 0
 _last_identity_refresh  = 0
-_last_rserver_refresh   = 0
-_last_hermes_refresh    = 0
-_last_weather_refresh   = 0
+_last_rserver_refresh  = 0
+_last_hermes_refresh   = 0
+_last_weather_refresh  = 0
+_last_calendar_refresh  = 0
 
 _cached_monitors   = {"monitors": [], "error": "initializing"}
-_cached_identity   = {"hostname": "homescreen", "kernel": "linux", "uptime": "loading", "tailscale": "—"}
-_cached_rserver    = {"cpu": "—", "mem": "—", "disk": "—", "uptime": "—", "containers": "—"}
-_cached_hermes     = {"status": "—", "uptime": "—", "active_crons": "—", "profile": "—"}
-_cached_weather    = {"temp": "—", "cond": "—", "wind": "—", "error": None}
+_cached_identity  = {"hostname": "homescreen", "kernel": "linux", "uptime": "loading", "tailscale": "—"}
+_cached_rserver   = {"cpu": "—", "mem": "—", "disk": "—", "uptime": "—", "containers": "—"}
+_cached_hermes    = {"status": "—", "uptime": "—", "active_crons": "—", "profile": "—"}
+_cached_weather   = {"temp": "—", "cond": "—", "wind": "—", "error": None}
+_cached_calendar  = {"events": [], "error": None}
 
 # ─── SSH COMMANDS ─────────────────────────────────────────────────────────────
 RS_MONITORS_CMD = [
@@ -83,6 +87,32 @@ RS_STATS_CMD = [
     "-i", "/home/kiosk/.ssh/id_ed25519",
     "r-server@100.84.224.18",
     "/usr/local/bin/rs-stats.sh"
+]
+
+# CalDAV: Nextcloud personal calendar via r-server as proxy
+# Credentials stored in /home/r-server/.env on r-server
+NC_CAL_CMD = [
+    "ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",
+    "-i", "/home/kiosk/.ssh/id_ed25519",
+    "r-server@100.84.224.18",
+    (
+        "source /home/r-server/.env 2>/dev/null && "
+        "curl -s -u \"${NEXTCLOUD_ADMIN_USER}:${NEXTCLOUD_ADMIN_PASSWORD}\" "
+        "-X REPORT \"http://localhost:9080/remote.php/dav/calendars/${NEXTCLOUD_ADMIN_USER}/personal/\" "
+        "-H 'Content-Type: application/xml; charset=utf-8' "
+        "-H 'Depth: 1' "
+        "--data-binary @- << 'CALREQ' "
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" ?>"
+        "<C:calendar-query xmlns:D=\"DAV:\" xmlns:C=\"urn:ietf:params:xml:ns:caldav\">"
+        "  <D:prop><C:calendar-data/></D:prop>"
+        "  <C:filter>"
+        "    <C:comp-filter name=\"VCALENDAR\">"
+        "      <C:comp-filter name=\"VEVENT\"/>"
+        "    </C:comp-filter>"
+        "  </C:filter>"
+        "</C:calendar-query>"
+        "CALREQ"
+    )
 ]
 
 # ─── DATA FETCHERS ────────────────────────────────────────────────────────────
@@ -224,6 +254,132 @@ WEATHER_CODES = {
 def _weather_name(code):
     return WEATHER_CODES.get(code, f"code{code}")
 
+def refresh_calendar():
+    """Fetch next 3 upcoming events from Nextcloud CalDAV personal calendar.
+    Parses VCALENDAR/VEVENT data from CalDAV REPORT response.
+    """
+    global _last_calendar_refresh, _cached_calendar
+    if time.time() - _last_calendar_refresh < 180:   # cache 3 min
+        return
+    _last_calendar_refresh = time.time()
+    try:
+        out = subprocess.run(
+            ["bash", "-c",
+             "source /home/r-server/.env 2>/dev/null && "
+             "curl -s -u \"${NEXTCLOUD_ADMIN_USER}:${NEXTCLOUD_ADMIN_PASSWORD}\" "
+             "-X REPORT \"http://localhost:9080/remote.php/dav/calendars/${NEXTCLOUD_ADMIN_USER}/personal/\" "
+             "-H 'Content-Type: application/xml; charset=utf-8' "
+             "-H 'Depth: 1' "
+             "--data-raw '<?xml version=\"1.0\" encoding=\"UTF-8\" ?>"
+             "<C:calendar-query xmlns:D=\"DAV:\" xmlns:C=\"urn:ietf:params:xml:ns:caldav\">"
+             "<D:prop><C:calendar-data/></D:prop>"
+             "<C:filter>"
+             "<C:comp-filter name=\"VCALENDAR\"><C:comp-filter name=\"VEVENT\"/></C:comp-filter>"
+             "</C:filter></C:calendar-query>'"],
+            timeout=20, capture_output=True, text=True,
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+        ).stdout
+
+        events = []
+        now_ts = time.time()
+
+        # Extract all VCALENDAR blocks
+        for block in re.findall(r'BEGIN:VCALENDAR\s+.*?END:VCALENDAR', out, re.DOTALL):
+            vevents = re.findall(r'BEGIN:VEVENT\s+.*?END:VEVENT', block, re.DOTALL)
+            for ve in vevents:
+                summary_m = re.search(r'SUMMARY[;TZ=]*:(.*)', ve)
+                dtstart_m = re.search(r'DTSTART(?:[^\n]*):([^\n]+)', ve)
+                dtend_m   = re.search(r'DTEND(?:[^\n]*):([^\n]+)', ve)
+                uid_m     = re.search(r'UID:(.*)', ve)
+
+                summary = summary_m.group(1).strip() if summary_m else "—"
+
+                # Parse start time
+                start_raw = dtstart_m.group(1).strip() if dtstart_m else None
+                end_raw   = dtend_m.group(1).strip()   if dtend_m   else None
+
+                start_ts = _parse_ical_date(start_raw) if start_raw else None
+                end_ts   = _parse_ical_date(end_raw)   if end_raw   else start_ts
+
+                # Skip past events
+                if start_ts and start_ts < now_ts - 300:   # 5-min grace
+                    continue
+
+                # Format display time
+                if start_ts:
+                    start_fmt = _format_event_time(start_ts, end_ts, start_raw)
+                else:
+                    start_fmt = start_raw or "—"
+
+                events.append({
+                    "summary": summary,
+                    "start":   start_fmt,
+                    "uid":     uid_m.group(1).strip() if uid_m else "",
+                })
+
+        # Sort by start timestamp, take next 3
+        def get_ts(e):
+            for b in re.findall(r'BEGIN:VEVENT.*?END:VEVENT', out, re.DOTALL):
+                if e["uid"] in b:
+                    m = re.search(r'DTSTART(?:[^\n]*):([^\n]+)', b)
+                    return _parse_ical_date(m.group(1)) if m else 0
+            return 0
+
+        future = [e for e in events if e.get("uid")]
+        future.sort(key=get_ts)
+
+        _cached_calendar = {"events": future[:3], "error": None}
+
+    except subprocess.TimeoutExpired:
+        _cached_calendar = {"events": [], "error": "cal timeout"}
+    except Exception as e:
+        _cached_calendar = {"events": [], "error": type(e).__name__}
+
+def _parse_ical_date(s):
+    """Parse iCal DATE or DATETIME (with or without TZ) into Unix timestamp."""
+    if not s:
+        return None
+    s = s.strip().replace("\\n", "")
+    # DATE: YYYYMMDD
+    # DATETIME: YYYYMMDDTHHMMSS or YYYYMMDDTHHMMSSZ
+    m = re.match(r'^(\d{4})(\d{2})(\d{2})(?:T(\d{2})(\d{2})(\d{2}))?', s)
+    if not m:
+        return None
+    try:
+        from datetime import datetime, timezone, timedelta
+        naive = datetime(int(m[1]), int(m[2]), int(m[3]),
+                        hour=int(m[4] or 0), minute=int(m[5] or 0), second=int(m[6] or 0))
+        if s.endswith('Z'):
+            naive = naive.replace(tzinfo=timezone.utc)
+        # Assume local time if no TZ; use UTC as fallback
+        try:
+            import calendar
+            return calendar.timegm(naive.utctimetuple())
+        except Exception:
+            return int(naive.timestamp())
+    except Exception:
+        return None
+
+def _format_event_time(start_ts, end_ts, raw):
+    """Human-readable time for an event."""
+    from datetime import datetime
+    try:
+        start_dt = datetime.utcfromtimestamp(start_ts)
+        now = datetime.utcnow()
+        diff = (start_dt.date() - now.date()).days
+
+        time_str = start_dt.strftime("%-I:%M%p").lower()
+        if diff == 0:
+            return f"Today {time_str}"
+        elif diff == 1:
+            return f"Tomorrow {time_str}"
+        elif diff == -1:
+            return f"Yesterday {time_str}"
+        else:
+            return start_dt.strftime("%a %b %-d {time_str}").format(time_str=time_str)
+    except Exception:
+        return raw or "—"
+
 # ─── HTTP HANDLER ─────────────────────────────────────────────────────────────
 class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
@@ -284,6 +440,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._json(_cached_weather)
             return
 
+        if path == "/calendar.json":
+            refresh_calendar()
+            self._json(_cached_calendar)
+            return
+
         if path == "/audio.json":
             mpv_running = False
             try:
@@ -313,23 +474,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         # ── backgrounds ────────────────────────────────────────────────────
         if path == "/backgrounds/list.json":
-            # Refresh list in case new GIFs were added
             _refresh_valid_gifs()
             self._json({"backgrounds": _valid_gifs})
             return
 
         if path.startswith("/backgrounds/"):
             fname = path[len("/backgrounds/"):]
-            # Security: only allow simple filenames
             if "/" in fname or ".." in fname:
                 self.send_response(400); self.end_headers()
                 self.wfile.write(b"bad path"); return
-
-            # Only serve from the pre-validated list — prevents serving broken files
             if fname not in _valid_gifs:
                 self.send_response(404); self.end_headers()
                 self.wfile.write(b"not found or not a valid GIF"); return
-
             fpath = _gifs_dir / fname
             try:
                 body = fpath.read_bytes()
@@ -356,6 +512,7 @@ if __name__ == "__main__":
     print(f"[GIF] Serving {len(_valid_gifs)} validated backgrounds", flush=True)
     refresh_monitors()
     refresh_identity()
+    refresh_calendar()   # warm cache on startup
     server = http.server.HTTPServer((HOST, PORT), Handler)
     print(f"kiosk-web listening on http://{HOST}:{PORT}/", flush=True)
     try:

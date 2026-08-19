@@ -15,16 +15,15 @@
     background: #0b1220;
   }
 
-  /* === Background: full-screen animated GIF, fully visible === */
+  /* === Background: two stacked animated GIFs for crossfade === */
   .bg {
     position: fixed;
     inset: 0;
     z-index: 0;
     overflow: hidden;
-    background: #000;
+    background: #0b1220;
   }
   .bg img {
-    /* Position centered, scaled to fully cover viewport */
     position: absolute;
     top: 50%;
     left: 50%;
@@ -35,9 +34,10 @@
     height: auto;
     image-rendering: pixelated;
     image-rendering: crisp-edges;
-    /* minimal darkening so pixel art is vivid */
     filter: brightness(0.95) contrast(1.05) saturate(1.25);
+    transition: opacity 1.2s ease-in-out;
   }
+  #bg-fade { opacity: 0; }
 
   /* === ONE consolidated tile, top-left, compact === */
   .tile {
@@ -46,7 +46,7 @@
     left: 14px;
     z-index: 1;
     width: 340px;
-    background: rgba(11, 18, 32, 0.78);
+    background: rgba(11, 18, 32, 0.82);
     backdrop-filter: blur(12px);
     -webkit-backdrop-filter: blur(12px);
     border: 1px solid rgba(99, 102, 241, 0.35);
@@ -113,6 +113,60 @@
   .row .val.red { color: #ef4444; }
   .row .val.amber { color: #f59e0b; }
   .row .val.cyan { color: #67e8f9; }
+
+  /* === Calendar: next event rows === */
+  .cal-section {
+    margin-top: 6px;
+    padding-top: 6px;
+    border-top: 1px solid rgba(99, 102, 241, 0.18);
+  }
+  .cal-section .cal-lbl {
+    color: #94a3b8;
+    font-size: 9px;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    font-weight: 700;
+    margin-bottom: 4px;
+  }
+  .cal-event {
+    display: flex;
+    gap: 6px;
+    padding: 2px 0;
+    align-items: flex-start;
+  }
+  .cal-event + .cal-event {
+    border-top: 1px solid rgba(99, 102, 241, 0.1);
+    margin-top: 2px;
+    padding-top: 4px;
+  }
+  .cal-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: #818cf8;
+    flex-shrink: 0;
+    margin-top: 4px;
+  }
+  .cal-dot.upcoming { background: #f59e0b; }
+  .cal-event-text { flex: 1; }
+  .cal-event-title {
+    font-size: 10px;
+    font-weight: 600;
+    color: #e2e8f0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .cal-event-time {
+    font-size: 9px;
+    color: #94a3b8;
+    margin-top: 1px;
+  }
+  .cal-empty {
+    font-size: 10px;
+    color: #64748b;
+    font-style: italic;
+  }
 
   /* === Monitors list: compact === */
   .mons {
@@ -181,7 +235,8 @@
 <body>
 
 <div class="bg">
-  <img id="bg-img" src="/backgrounds/alone.gif" alt="">
+  <img id="bg-main" src="/backgrounds/alone.gif" alt="">
+  <img id="bg-fade" src="" alt="">
 </div>
 
 <div class="tile">
@@ -196,7 +251,7 @@
   </div>
   <div class="date" id="date">--</div>
 
-  <!-- Identity + Weather (collapsed) -->
+  <!-- Identity + Status rows -->
   <div class="row" style="margin-top:8px">
     <span class="lbl">weather</span>
     <span class="val cyan" id="wx-now">—</span>
@@ -209,8 +264,6 @@
     <span class="lbl">r-server</span>
     <span class="val" id="rs-status">—</span>
   </div>
-
-  <!-- r-server stats -->
   <div class="row">
     <span class="lbl">cpu · mem · disk</span>
     <span class="val cyan" id="rs-stats">— · — · —</span>
@@ -222,6 +275,14 @@
   <div class="row">
     <span class="lbl">audio</span>
     <span class="val" id="audio-status">—</span>
+  </div>
+
+  <!-- Calendar: next event -->
+  <div class="cal-section">
+    <div class="cal-lbl">up next</div>
+    <div id="cal-events">
+      <div class="cal-empty">loading…</div>
+    </div>
   </div>
 
   <!-- Monitors -->
@@ -236,15 +297,17 @@
   </div>
 </div>
 
-<!-- Footer: bg name + refresh interval -->
+<!-- Footer: bg name + somafm + version -->
 <div class="footer">
-  bg: <span class="v" id="f-bg">—</span> · ♫ somafm · 100.110.212.126 · v2.2
+  bg: <span class="v" id="f-bg">—</span> · ♫ somafm · 100.110.212.126 · v2.3
 </div>
 
 <script>
-const REFRESH_MS = 10000;
-const BG_ROTATE_MS = 5 * 60 * 1000;
+const REFRESH_MS  = 10000;
+const BG_MS        = 5 * 60 * 1000;   // rotate background every 5 min
+const PRELOAD_AHEAD = 30 * 1000;       // preload 30s before rotate
 
+// ── Clock ────────────────────────────────────────────────────────────────────
 function pad(n) { return n < 10 ? "0" + n : "" + n; }
 
 function updateClock() {
@@ -259,11 +322,17 @@ function updateClock() {
     days[d.getDay()] + ", " + months[d.getMonth()] + " " + d.getDate();
 }
 
+// ── API helpers ──────────────────────────────────────────────────────────────
 async function fetchJSON(url) {
   try { const r = await fetch(url, { cache: "no-store" }); return await r.json(); }
   catch (e) { return null; }
 }
 
+function escapeHTML(s) {
+  return (s || "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+
+// ── Status refreshers ─────────────────────────────────────────────────────────
 async function refreshIdentity() {
   const d = await fetchJSON("/identity.json"); if (!d) return;
   const tsState = (d.tailscale || "—").toLowerCase();
@@ -286,8 +355,9 @@ async function refreshMonitors() {
   const cnt = document.getElementById("mon-count");
   cnt.textContent = up + " UP · " + down + " DOWN";
   cnt.className = "count" + (down > 0 ? " crit" : "");
-  const grid = document.getElementById("mons-grid"); grid.innerHTML = "";
-  for (const m of monitors) {
+  const grid = document.getElementById("mons-grid");
+  grid.innerHTML = "";
+  for (const m of monitors.slice(0, 10)) {
     const div = document.createElement("div");
     div.className = "mon" + (m.active ? "" : " down");
     div.innerHTML = '<span class="name">' + escapeHTML(m.name) + '</span><span class="dot"></span>';
@@ -300,8 +370,6 @@ async function refreshRSStats() {
   document.getElementById("rs-stats").textContent =
     (d.cpu || "—") + "% · " + (d.mem || "—") + "% · " + (d.disk || "—") + " GB";
   document.getElementById("rs-up").textContent = d.uptime || "—";
-  // rs status indicator
-  const cpu = parseInt(d.cpu || 0);
   const status = document.getElementById("rs-status");
   if (d.cpu && d.cpu !== "—") {
     status.textContent = "● online";
@@ -315,7 +383,6 @@ async function refreshRSStats() {
 async function refreshHermes() {
   const d = await fetchJSON("/hermes-health.json"); if (!d) return;
   document.getElementById("ts-count").textContent = d.tailscale_online || "—";
-  // r-server row also reflects hermes info; rely on rs-status above
 }
 
 async function refreshWeather() {
@@ -329,7 +396,6 @@ async function refreshAudio() {
   const a = await fetchJSON("/audio.json"); if (!a) return;
   const el = document.getElementById("audio-status");
   if (a.playing) {
-    // Show playing + short track
     const track = (a.track || a.station || "").replace(/^.*? - /, "").slice(0, 32);
     el.textContent = "♫ " + (track || "playing");
     el.className = "val cyan";
@@ -339,26 +405,106 @@ async function refreshAudio() {
   }
 }
 
-async function rotateBackground() {
+// ── Calendar ──────────────────────────────────────────────────────────────────
+async function refreshCalendar() {
+  const d = await fetchJSON("/calendar.json"); if (!d) return;
+  const container = document.getElementById("cal-events");
+  if (d.error) {
+    container.innerHTML = '<div class="cal-empty">unavailable</div>';
+    return;
+  }
+  const events = d.events || [];
+  if (events.length === 0) {
+    container.innerHTML = '<div class="cal-empty">no upcoming events</div>';
+    return;
+  }
+  container.innerHTML = "";
+  for (const ev of events.slice(0, 3)) {
+    const div = document.createElement("div");
+    div.className = "cal-event";
+    const dotClass = ev.start.toLowerCase().includes("today") ? "upcoming" : "";
+    div.innerHTML =
+      '<span class="cal-dot ' + dotClass + '"></span>' +
+      '<div class="cal-event-text">' +
+        '<div class="cal-event-title" title="' + escapeHTML(ev.summary) + '">' +
+          escapeHTML(ev.summary) + '</div>' +
+        '<div class="cal-event-time">' + escapeHTML(ev.start) + '</div>' +
+      '</div>';
+    container.appendChild(div);
+  }
+}
+
+// ── Flash-free background rotation ────────────────────────────────────────────
+let _currentBg = "alone.gif";
+let _nextBg    = null;
+let _preloadTimer = null;
+
+async function _pickBg(exclude) {
   const list = await fetchJSON("/backgrounds/list.json");
-  if (!list || !list.backgrounds || list.backgrounds.length === 0) return;
-  const pick = list.backgrounds[Math.floor(Math.random() * list.backgrounds.length)];
-  const url = "/backgrounds/" + encodeURIComponent(pick) + "?t=" + Date.now();
-  document.getElementById("bg-img").src = url;
-  document.getElementById("f-bg").textContent = pick.replace(/\.gif$/i, "");
+  if (!list || !list.backgrounds || list.backgrounds.length === 0) return null;
+  const opts = list.backgrounds.filter(b => b !== exclude);
+  return opts.length > 0 ? opts[Math.floor(Math.random() * opts.length)] : null;
 }
 
-function escapeHTML(s) {
-  return (s || "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+function _doRotate(newBg) {
+  if (!newBg) return;
+  const main = document.getElementById("bg-main");
+  const fade = document.getElementById("bg-fade");
+
+  // Start fade-in of the new image via the fade layer
+  fade.src = "/backgrounds/" + encodeURIComponent(newBg) + "?t=" + Date.now();
+  fade.onload = () => {
+    // Once loaded, crossfade: fade layer goes 1 → main goes 0
+    main.style.opacity = "0";
+    fade.style.opacity = "1";
+    // After transition, make main point to new image, reset both
+    setTimeout(() => {
+      main.src = fade.src;
+      main.style.opacity = "1";
+      fade.style.opacity = "0";
+      fade.src = "";
+    }, 1300);
+  };
+
+  _currentBg = newBg;
+  document.getElementById("f-bg").textContent = newBg.replace(/\.gif$/i, "");
 }
 
+async function rotateBackground() {
+  const newBg = await _pickBg(_currentBg);
+  if (newBg && newBg !== _currentBg) {
+    _doRotate(newBg);
+  }
+}
+
+function schedulePreload() {
+  if (_preloadTimer) clearTimeout(_preloadTimer);
+  _preloadTimer = setTimeout(async () => {
+    const next = await _pickBg(_currentBg);
+    if (next && next !== _currentBg) {
+      _nextBg = next;
+      // Eagerly load into a hidden img so browser caches it
+      const img = new Image();
+      img.src = "/backgrounds/" + encodeURIComponent(next) + "?t=" + Date.now();
+    }
+    // Schedule the actual rotate
+    _preloadTimer = setTimeout(() => rotateBackground(), BG_MS - PRELOAD_AHEAD);
+  }, PRELOAD_AHEAD);
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
 updateClock();
 setInterval(updateClock, 1000);
-refreshIdentity(); refreshMonitors(); refreshRSStats(); refreshHermes(); refreshWeather(); refreshAudio();
-setInterval(() => { refreshIdentity(); refreshMonitors(); refreshRSStats(); refreshHermes(); refreshWeather(); refreshAudio(); }, REFRESH_MS);
 
-rotateBackground();
-setInterval(rotateBackground, BG_ROTATE_MS);
+refreshIdentity(); refreshMonitors(); refreshRSStats();
+refreshHermes(); refreshWeather(); refreshAudio(); refreshCalendar();
+setInterval(() => {
+  refreshIdentity(); refreshMonitors(); refreshRSStats();
+  refreshHermes(); refreshWeather(); refreshAudio(); refreshCalendar();
+}, REFRESH_MS);
+
+// Start background rotation loop
+schedulePreload();
 </script>
 </body>
 </html>
