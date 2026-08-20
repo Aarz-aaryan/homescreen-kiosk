@@ -22,6 +22,8 @@ import subprocess
 import os
 import re
 import time
+import urllib.request
+import urllib.parse
 from pathlib import Path
 
 KIOSK_DIR = Path("/opt/kiosk")
@@ -90,30 +92,8 @@ RS_STATS_CMD = [
 ]
 
 # CalDAV: Nextcloud personal calendar via r-server as proxy
+# [DEPRECATED — now using Google Calendar API directly]
 # Credentials stored in /home/r-server/.env on r-server
-NC_CAL_CMD = [
-    "ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",
-    "-i", "/home/kiosk/.ssh/id_ed25519",
-    "r-server@100.84.224.18",
-    (
-        "source /home/r-server/.env 2>/dev/null && "
-        "curl -s -u \"${NEXTCLOUD_ADMIN_USER}:${NEXTCLOUD_ADMIN_PASSWORD}\" "
-        "-X REPORT \"http://localhost:9080/remote.php/dav/calendars/${NEXTCLOUD_ADMIN_USER}/personal/\" "
-        "-H 'Content-Type: application/xml; charset=utf-8' "
-        "-H 'Depth: 1' "
-        "--data-binary @- << 'CALREQ' "
-        "<?xml version=\"1.0\" encoding=\"UTF-8\" ?>"
-        "<C:calendar-query xmlns:D=\"DAV:\" xmlns:C=\"urn:ietf:params:xml:ns:caldav\">"
-        "  <D:prop><C:calendar-data/></D:prop>"
-        "  <C:filter>"
-        "    <C:comp-filter name=\"VCALENDAR\">"
-        "      <C:comp-filter name=\"VEVENT\"/>"
-        "    </C:comp-filter>"
-        "  </C:filter>"
-        "</C:calendar-query>"
-        "CALREQ"
-    )
-]
 
 # ─── DATA FETCHERS ────────────────────────────────────────────────────────────
 def refresh_monitors():
@@ -255,95 +235,145 @@ def _weather_name(code):
     return WEATHER_CODES.get(code, f"code{code}")
 
 def refresh_calendar():
-    """Fetch HAPPENING NOW + next 3 upcoming events from Nextcloud CalDAV personal calendar.
+    """Fetch HAPPENING NOW + next 3 upcoming events from Google Calendar API.
     Returns: {"now": [...active events], "next": [...upcoming events], "error": null}
+    Uses /home/kiosk/google_token.json (OAuth2 token for aaryantahir8918@gmail.com).
     """
     global _last_calendar_refresh, _cached_calendar
     if time.time() - _last_calendar_refresh < 180:   # cache 3 min
         return
     _last_calendar_refresh = time.time()
+
     try:
-        out = subprocess.run(
-            ["bash", "-c",
-             "source /home/r-server/.env 2>/dev/null && "
-             "curl -s -u \"${NEXTCLOUD_ADMIN_USER}:${NEXTCLOUD_ADMIN_PASSWORD}\" "
-             "-X REPORT \"http://localhost:9080/remote.php/dav/calendars/${NEXTCLOUD_ADMIN_USER}/personal/\" "
-             "-H 'Content-Type: application/xml; charset=utf-8' "
-             "-H 'Depth: 1' "
-             "--data-raw '<?xml version=\"1.0\" encoding=\"UTF-8\" ?>"
-             "<C:calendar-query xmlns:D=\"DAV:\" xmlns:C=\"urn:ietf:params:xml:ns:caldav\">"
-             "<D:prop><C:calendar-data/></D:prop>"
-             "<C:filter>"
-             "<C:comp-filter name=\"VCALENDAR\"><C:comp-filter name=\"VEVENT\"/></C:comp-filter>"
-             "</C:filter></C:calendar-query>'"],
-            timeout=20, capture_output=True, text=True,
-            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"}
-        ).stdout
+        import urllib.request
+
+        token_path = "/home/kiosk/google_token.json"
+        with open(token_path) as f:
+            token_data = json.load(f)
+        access_token = token_data.get("token")
+        if not access_token:
+            _cached_calendar = {"now": [], "next": [], "error": "no access token"}
+            return
+
+        # Build ISO time range: today 00:00 to 7 days ahead 23:59 in ET (UTC-4)
+        now_ts = time.time()
+        from datetime import datetime, timezone, timedelta
+        et_offset = timedelta(hours=-4)
+        et_tz = timezone(et_offset)
+        now_dt = datetime.fromtimestamp(now_ts, tz=et_tz)
+        start_iso = now_dt.replace(hour=0, minute=0, second=0, microsecond=0).strftime("%Y-%m-%dT%H:%M:%S%z")
+        end_dt = now_dt + timedelta(days=7)
+        end_iso = end_dt.replace(hour=23, minute=59, second=59, microsecond=0).strftime("%Y-%m-%dT%H:%M:%S%z")
+
+        # Google Calendar API: list events on primary calendar
+        import urllib.parse
+        params = urllib.parse.urlencode({
+            "timeMin": start_iso,
+            "timeMax": end_iso,
+            "singleEvents": "true",
+            "orderBy": "startTime",
+            "maxResults": "20",
+        })
+        url = f"https://www.googleapis.com/calendar/v3/calendars/primary/events?{params}"
+        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {access_token}"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            gdata = json.loads(resp.read())
 
         now_events = []
         next_events = []
-        now_ts = time.time()
 
-        # Extract all VCALENDAR blocks
-        for block in re.findall(r'BEGIN:VCALENDAR\s+.*?END:VCALENDAR', out, re.DOTALL):
-            vevents = re.findall(r'BEGIN:VEVENT\s+.*?END:VEVENT', block, re.DOTALL)
-            for ve in vevents:
-                summary_m = re.search(r'SUMMARY[;TZ=]*:(.*)', ve)
-                dtstart_m = re.search(r'DTSTART(?:[^\n]*):([^\n]+)', ve)
-                dtend_m   = re.search(r'DTEND(?:[^\n]*):([^\n]+)', ve)
-                uid_m     = re.search(r'UID:(.*)', ve)
+        for ev in gdata.get("items", []):
+            summary = ev.get("summary", "—")
+            start_info = ev.get("start", {})
+            end_info = ev.get("end", {})
 
-                summary = summary_m.group(1).strip() if summary_m else "—"
+            # dateTime = datetime with TZ; date = all-day (whole day)
+            start_dt_str = start_info.get("dateTime") or start_info.get("date")
+            end_dt_str = end_info.get("dateTime") or end_info.get("date")
 
-                # Parse start time
-                start_raw = dtstart_m.group(1).strip() if dtstart_m else None
-                end_raw   = dtend_m.group(1).strip()   if dtend_m   else None
+            if not start_dt_str:
+                continue
 
-                start_ts = _parse_ical_date(start_raw) if start_raw else None
-                end_ts   = _parse_ical_date(end_raw)   if end_raw   else start_ts
-
-                # Skip events that ended more than 5 min ago
-                if end_ts and end_ts < now_ts - 300:
-                    continue
-
-                # Format display time
-                if start_ts:
-                    start_fmt = _format_event_time(start_ts, end_ts, start_raw)
+            # Parse start/end
+            def parse_google_dt(s):
+                # "2026-08-19T14:00:00-04:00" or "2026-08-19"
+                if "T" in s:
+                    try:
+                        return datetime.fromisoformat(s.replace("Z", "+00:00"))
+                    except Exception:
+                        return None
                 else:
-                    start_fmt = start_raw or "—"
+                    try:
+                        return datetime.strptime(s, "%Y-%m-%d")
+                    except Exception:
+                        return None
 
-                ev = {
-                    "summary": summary,
-                    "start":   start_fmt,
-                    "uid":     uid_m.group(1).strip() if uid_m else "",
-                    "_start":  start_ts,
-                    "_end":    end_ts,
-                }
+            start_dt = parse_google_dt(start_dt_str)
+            end_dt = parse_google_dt(end_dt_str) if end_dt_str else None
 
-                # HAPPENING NOW: started before/now, ends after now
-                if start_ts and start_ts <= now_ts and end_ts and end_ts > now_ts:
-                    now_events.append(ev)
-                elif start_ts and start_ts <= now_ts and not end_ts:
-                    # All-day or no end: show if started before now
-                    now_events.append(ev)
-                else:
-                    next_events.append(ev)
+            if not start_dt:
+                continue
+
+            # Compute Unix timestamps for comparison
+            start_ts = start_dt.timestamp() if start_dt else None
+            end_ts = end_dt.timestamp() if end_dt else start_ts
+
+            # Format display time
+            def fmt_time(dt):
+                if not dt:
+                    return "—"
+                if dt.hour == 0 and dt.minute == 0 and dt.second == 0:
+                    return dt.strftime("%b %-d")   # all-day: "Aug 19"
+                return dt.strftime("%-I:%M%p")    # "3:00pm"
+
+            time_str = fmt_time(start_dt)
+
+            ev_data = {
+                "summary": summary,
+                "start": time_str,
+                "uid": ev.get("id", ""),
+                "_start_ts": start_ts,
+                "_end_ts": end_ts,
+            }
+
+            # HAPPENING NOW: started before/now, ends after now
+            if start_ts and start_ts <= now_ts and end_ts and end_ts > now_ts:
+                now_events.append(ev_data)
+            elif start_ts and start_ts <= now_ts and not end_ts:
+                # All-day event started today — treat as happening now
+                now_events.append(ev_data)
+            else:
+                next_events.append(ev_data)
 
         # Sort both lists by start timestamp
         def get_ts(e):
-            return e.get("_start") or 0
+            return e.get("_start_ts") or 0
 
         now_events.sort(key=get_ts)
         next_events.sort(key=get_ts)
 
+        # Format "now" events: show with "Since X" if ongoing
+        def fmt_now(ev):
+            if ev.get("_start_ts"):
+                start_dt = datetime.fromtimestamp(ev["_start_ts"], tz=et_tz)
+                return f"Since {start_dt.strftime('%-I:%M%p').lower()}"
+            return ev.get("start", "—")
+
+        now_formatted = [
+            {"summary": ev["summary"], "start": fmt_now(ev), "uid": ev["uid"]}
+            for ev in now_events
+        ]
+        next_formatted = [
+            {"summary": ev["summary"], "start": ev["start"], "uid": ev["uid"]}
+            for ev in next_events[:3]
+        ]
+
         _cached_calendar = {
-            "now":  now_events,
-            "next": next_events[:3],
+            "now": now_formatted,
+            "next": next_formatted,
             "error": None,
         }
 
-    except subprocess.TimeoutExpired:
-        _cached_calendar = {"now": [], "next": [], "error": "cal timeout"}
     except Exception as e:
         _cached_calendar = {"now": [], "next": [], "error": type(e).__name__}
 
