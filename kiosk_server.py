@@ -255,8 +255,8 @@ def _weather_name(code):
     return WEATHER_CODES.get(code, f"code{code}")
 
 def refresh_calendar():
-    """Fetch next 3 upcoming events from Nextcloud CalDAV personal calendar.
-    Parses VCALENDAR/VEVENT data from CalDAV REPORT response.
+    """Fetch HAPPENING NOW + next 3 upcoming events from Nextcloud CalDAV personal calendar.
+    Returns: {"now": [...active events], "next": [...upcoming events], "error": null}
     """
     global _last_calendar_refresh, _cached_calendar
     if time.time() - _last_calendar_refresh < 180:   # cache 3 min
@@ -280,7 +280,8 @@ def refresh_calendar():
             env={**os.environ, "GIT_TERMINAL_PROMPT": "0"}
         ).stdout
 
-        events = []
+        now_events = []
+        next_events = []
         now_ts = time.time()
 
         # Extract all VCALENDAR blocks
@@ -301,8 +302,8 @@ def refresh_calendar():
                 start_ts = _parse_ical_date(start_raw) if start_raw else None
                 end_ts   = _parse_ical_date(end_raw)   if end_raw   else start_ts
 
-                # Skip past events
-                if start_ts and start_ts < now_ts - 300:   # 5-min grace
+                # Skip events that ended more than 5 min ago
+                if end_ts and end_ts < now_ts - 300:
                     continue
 
                 # Format display time
@@ -311,29 +312,40 @@ def refresh_calendar():
                 else:
                     start_fmt = start_raw or "—"
 
-                events.append({
+                ev = {
                     "summary": summary,
                     "start":   start_fmt,
                     "uid":     uid_m.group(1).strip() if uid_m else "",
-                })
+                    "_start":  start_ts,
+                    "_end":    end_ts,
+                }
 
-        # Sort by start timestamp, take next 3
+                # HAPPENING NOW: started before/now, ends after now
+                if start_ts and start_ts <= now_ts and end_ts and end_ts > now_ts:
+                    now_events.append(ev)
+                elif start_ts and start_ts <= now_ts and not end_ts:
+                    # All-day or no end: show if started before now
+                    now_events.append(ev)
+                else:
+                    next_events.append(ev)
+
+        # Sort both lists by start timestamp
         def get_ts(e):
-            for b in re.findall(r'BEGIN:VEVENT.*?END:VEVENT', out, re.DOTALL):
-                if e["uid"] in b:
-                    m = re.search(r'DTSTART(?:[^\n]*):([^\n]+)', b)
-                    return _parse_ical_date(m.group(1)) if m else 0
-            return 0
+            return e.get("_start") or 0
 
-        future = [e for e in events if e.get("uid")]
-        future.sort(key=get_ts)
+        now_events.sort(key=get_ts)
+        next_events.sort(key=get_ts)
 
-        _cached_calendar = {"events": future[:3], "error": None}
+        _cached_calendar = {
+            "now":  now_events,
+            "next": next_events[:3],
+            "error": None,
+        }
 
     except subprocess.TimeoutExpired:
-        _cached_calendar = {"events": [], "error": "cal timeout"}
+        _cached_calendar = {"now": [], "next": [], "error": "cal timeout"}
     except Exception as e:
-        _cached_calendar = {"events": [], "error": type(e).__name__}
+        _cached_calendar = {"now": [], "next": [], "error": type(e).__name__}
 
 def _parse_ical_date(s):
     """Parse iCal DATE or DATETIME (with or without TZ) into Unix timestamp."""

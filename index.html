@@ -147,7 +147,8 @@
     flex-shrink: 0;
     margin-top: 4px;
   }
-  .cal-dot.upcoming { background: #f59e0b; }
+  .cal-dot.now { background: #22c55e; }   /* happening now — green */
+  .cal-dot.upcoming { background: #f59e0b; }  /* today — amber */
   .cal-event-text { flex: 1; }
   .cal-event-title {
     font-size: 10px;
@@ -277,10 +278,16 @@
     <span class="val" id="audio-status">—</span>
   </div>
 
-  <!-- Calendar: next event -->
+  <!-- Calendar: HAPPENING NOW + UP NEXT -->
+  <div class="cal-section">
+    <div class="cal-lbl">happening now</div>
+    <div id="cal-now">
+      <div class="cal-empty">—</div>
+    </div>
+  </div>
   <div class="cal-section">
     <div class="cal-lbl">up next</div>
-    <div id="cal-events">
+    <div id="cal-next">
       <div class="cal-empty">loading…</div>
     </div>
   </div>
@@ -408,29 +415,52 @@ async function refreshAudio() {
 // ── Calendar ──────────────────────────────────────────────────────────────────
 async function refreshCalendar() {
   const d = await fetchJSON("/calendar.json"); if (!d) return;
-  const container = document.getElementById("cal-events");
+
+  // HAPPENING NOW
+  const nowContainer = document.getElementById("cal-now");
+  const nowEvents = d.now || [];
   if (d.error) {
-    container.innerHTML = '<div class="cal-empty">unavailable</div>';
-    return;
+    nowContainer.innerHTML = '<div class="cal-empty">unavailable</div>';
+  } else if (nowEvents.length === 0) {
+    nowContainer.innerHTML = '<div class="cal-empty">—</div>';
+  } else {
+    nowContainer.innerHTML = "";
+    for (const ev of nowEvents) {
+      const div = document.createElement("div");
+      div.className = "cal-event";
+      div.innerHTML =
+        '<span class="cal-dot now"></span>' +
+        '<div class="cal-event-text">' +
+          '<div class="cal-event-title" title="' + escapeHTML(ev.summary) + '">' +
+            escapeHTML(ev.summary) + '</div>' +
+          '<div class="cal-event-time">' + escapeHTML(ev.start) + '</div>' +
+        '</div>';
+      nowContainer.appendChild(div);
+    }
   }
-  const events = d.events || [];
-  if (events.length === 0) {
-    container.innerHTML = '<div class="cal-empty">no upcoming events</div>';
-    return;
-  }
-  container.innerHTML = "";
-  for (const ev of events.slice(0, 3)) {
-    const div = document.createElement("div");
-    div.className = "cal-event";
-    const dotClass = ev.start.toLowerCase().includes("today") ? "upcoming" : "";
-    div.innerHTML =
-      '<span class="cal-dot ' + dotClass + '"></span>' +
-      '<div class="cal-event-text">' +
-        '<div class="cal-event-title" title="' + escapeHTML(ev.summary) + '">' +
-          escapeHTML(ev.summary) + '</div>' +
-        '<div class="cal-event-time">' + escapeHTML(ev.start) + '</div>' +
-      '</div>';
-    container.appendChild(div);
+
+  // UP NEXT
+  const nextContainer = document.getElementById("cal-next");
+  const nextEvents = d.next || [];
+  if (d.error) {
+    nextContainer.innerHTML = '<div class="cal-empty">unavailable</div>';
+  } else if (nextEvents.length === 0) {
+    nextContainer.innerHTML = '<div class="cal-empty">no upcoming events</div>';
+  } else {
+    nextContainer.innerHTML = "";
+    for (const ev of nextEvents) {
+      const div = document.createElement("div");
+      div.className = "cal-event";
+      const dotClass = ev.start.toLowerCase().includes("today") ? "upcoming" : "";
+      div.innerHTML =
+        '<span class="cal-dot ' + dotClass + '"></span>' +
+        '<div class="cal-event-text">' +
+          '<div class="cal-event-title" title="' + escapeHTML(ev.summary) + '">' +
+            escapeHTML(ev.summary) + '</div>' +
+          '<div class="cal-event-time">' + escapeHTML(ev.start) + '</div>' +
+        '</div>';
+      nextContainer.appendChild(div);
+    }
   }
 }
 
